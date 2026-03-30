@@ -207,28 +207,16 @@ impl<'d> Ws2812Esp32RmtDriverBuilder<'d> {
             )?
         };
 
+        let queue = self.tx.queue_owned(core::iter::once(encoder));
+
         Ok(Ws2812Esp32RmtDriver {
-            tx: self.tx,
-            encoder,
+            queue,
             #[cfg(not(target_vendor = "espressif"))]
             pixel_data: None,
             #[cfg(not(target_vendor = "espressif"))]
             phantom: Default::default(),
         })
     }
-}
-
-/// An in-progress non-blocking WS2812 transmission.
-///
-/// Dropping this value will block until the transmission is complete.
-#[cfg(target_vendor = "espressif")]
-pub struct Ws2812Esp32RmtTxQueue<'c, 'd> {
-    queue: TxQueue<'c, 'd, &'c mut BytesEncoder>,
-}
-
-#[cfg(not(target_vendor = "espressif"))]
-pub struct Ws2812Esp32RmtTxQueue<'c, 'd> {
-    driver: &'c mut Ws2812Esp32RmtDriver<'d>,
 }
 
 /// WS2812 ESP32 RMT driver wrapper.
@@ -255,10 +243,7 @@ pub struct Ws2812Esp32RmtTxQueue<'c, 'd> {
 /// driver.write_blocking(core::iter::once(pixel.as_ref())).unwrap();
 /// ```
 pub struct Ws2812Esp32RmtDriver<'d> {
-    /// TxChannelDriver
-    tx: TxChannelDriver<'d>,
-    /// BytesEncoder with WS2812 timing configuration.
-    encoder: BytesEncoder,
+    queue: TxQueue<'d, TxChannelDriver<'d>, BytesEncoder>,
 
     /// Pixel binary array to be written
     ///
@@ -301,7 +286,7 @@ impl<'d> Ws2812Esp32RmtDriver<'d> {
     /// # Errors
     ///
     /// Returns an error if an RMT driver error occurred.
-    pub fn write_blocking<S, T>(
+    pub fn write_seq_blocking<S, T>(
         &mut self,
         pixel_sequence: T,
     ) -> Result<(), Ws2812Esp32RmtDriverError>
@@ -309,32 +294,30 @@ impl<'d> Ws2812Esp32RmtDriver<'d> {
         S: AsRef<[u8]>,
         T: Iterator<Item = S>,
     {
-        self.queue().push_seq_blocking(pixel_sequence)?;
+        for signal in pixel_sequence {
+            self.write_blocking(signal.as_ref())?;
+        }
         Ok(())
     }
 
-    /// Creates a new queue to transmit multiple symbols.
+    /// Writes pixel data to the IO pin, using a pre-made queue, blocking.
     ///
-    /// This is mostly useful for non-blocking transmission, but it can also be used
-    /// for blocking transmission if then the caller wants to reuse the same queue for
-    /// multiple transmissions.
+    /// Byte count per LED pixel and channel order is not handled by this method.
+    /// The pixel data sequence has to be correctly laid out depending on the LED strip model.
     ///
-    /// Note: Dropping the queue will block until the transmission is complete,
-    /// so be careful to not drop the queue prematurely.
-    pub fn queue<'a>(&'a mut self) -> Ws2812Esp32RmtTxQueue<'a, 'd> {
+    /// # Errors
+    ///
+    /// Returns an error if an RMT driver error occurred.
+    pub fn write_blocking(&mut self, pixel: &[u8]) -> Result<(), Ws2812Esp32RmtDriverError> {
         #[cfg(target_vendor = "espressif")]
-        {
-            let queue = self.tx.queue(core::iter::once(&mut self.encoder));
-            Ws2812Esp32RmtTxQueue { queue }
-        }
+        self.queue.push(pixel, &TransmitConfig::default())?;
         #[cfg(not(target_vendor = "espressif"))]
         {
-            Ws2812Esp32RmtTxQueue { driver: self }
+            self.driver.pixel_data = Some(pixel.to_vec());
         }
+        Ok(())
     }
-}
 
-impl<'c, 'd> Ws2812Esp32RmtTxQueue<'c, 'd> {
     /// Writes pixel data to the IO pin, using a pre-made queue, without blocking.
     ///
     /// Byte count per LED pixel and channel order is not handled by this method.
@@ -344,7 +327,7 @@ impl<'c, 'd> Ws2812Esp32RmtTxQueue<'c, 'd> {
     ///
     /// Returns an error if an RMT driver error occurred, for example if the data cannot
     /// be pushed to the transmission queue without blocking.
-    pub fn push(&mut self, pixel: &[u8]) -> Result<(), Ws2812Esp32RmtDriverError> {
+    pub fn write(&mut self, pixel: &[u8]) -> Result<(), Ws2812Esp32RmtDriverError> {
         #[cfg(target_vendor = "espressif")]
         {
             let config = TransmitConfig {
@@ -360,44 +343,4 @@ impl<'c, 'd> Ws2812Esp32RmtTxQueue<'c, 'd> {
         Ok(())
     }
 
-    /// Writes pixel data to the IO pin, using a pre-made queue, blocking.
-    ///
-    /// Byte count per LED pixel and channel order is not handled by this method.
-    /// The pixel data sequence has to be correctly laid out depending on the LED strip model.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if an RMT driver error occurred.
-    pub fn push_blocking(&mut self, pixel: &[u8]) -> Result<(), Ws2812Esp32RmtDriverError> {
-        #[cfg(target_vendor = "espressif")]
-        self.queue.push(pixel, &TransmitConfig::default())?;
-        #[cfg(not(target_vendor = "espressif"))]
-        {
-            self.driver.pixel_data = Some(pixel.to_vec());
-        }
-        Ok(())
-    }
-
-    /// Writes pixel data from a pixel-byte sequence to the IO pin using a pre-made queue,
-    /// blocking.
-    ///
-    /// Byte count per LED pixel and channel order is not handled by this method.
-    /// The pixel data sequence has to be correctly laid out depending on the LED strip model.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if an RMT driver error occurred.
-    pub fn push_seq_blocking<S, T>(
-        &mut self,
-        pixel_sequence: T,
-    ) -> Result<(), Ws2812Esp32RmtDriverError>
-    where
-        S: AsRef<[u8]>,
-        T: Iterator<Item = S>,
-    {
-        for signal in pixel_sequence {
-            self.push_blocking(signal.as_ref())?;
-        }
-        Ok(())
-    }
 }
